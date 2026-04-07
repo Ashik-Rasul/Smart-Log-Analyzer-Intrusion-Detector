@@ -6,6 +6,7 @@ import os
 import subprocess
 import signal
 import sys
+import select
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -14,7 +15,7 @@ BLACKLIST_FILE = "blacklist.txt"
 
 TEMP_BLOCK_TIME = timedelta(hours=2)
 
-# Control flag for clean shutdown
+# Control flag
 running = True
 
 def stop_handler(sig, frame):
@@ -74,7 +75,6 @@ total_attacks = 0
 # ---------------------------
 
 def block_ip(ip):
-    # Prevent duplicate rules
     check = subprocess.call(
         ["sudo", "iptables", "-C", "INPUT", "-s", ip, "-j", "DROP"],
         stdout=subprocess.DEVNULL,
@@ -103,7 +103,6 @@ def ensure_blacklist():
 
 
 def write_blacklist(ip, attack, count):
-
     ensure_blacklist()
 
     if attack in ip_attack_history[ip]:
@@ -175,14 +174,19 @@ print("[+] Starting Snort IDS Monitor...\n")
 try:
     with open(LOG_FILE, "r") as logfile:
 
-        logfile.seek(0, 2)  # move to end
+        logfile.seek(0, 2)
 
         while running:
+
+            # NON-BLOCKING CHECK
+            ready, _, _ = select.select([logfile], [], [], 0.5)
+
+            if not ready:
+                continue
 
             line = logfile.readline()
 
             if not line:
-                time.sleep(0.5)
                 continue
 
             ip_match = re.findall(ip_regex, line)
@@ -221,7 +225,7 @@ try:
 
             dashboard()
 
-            # Handle temporary unblock
+            # UNBLOCK LOGIC
             for ip, block_time in list(blocked_ips.items()):
 
                 if datetime.now() - block_time > TEMP_BLOCK_TIME and ip not in permanent_block:
