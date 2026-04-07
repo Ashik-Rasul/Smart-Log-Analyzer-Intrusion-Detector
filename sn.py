@@ -1,7 +1,11 @@
+#!/usr/bin/env python3
+
 import time
 import re
 import os
 import subprocess
+import signal
+import sys
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -9,6 +13,17 @@ LOG_FILE = "/var/log/snort/snort.alert.fast"
 BLACKLIST_FILE = "blacklist.txt"
 
 TEMP_BLOCK_TIME = timedelta(hours=2)
+
+# Control flag for clean shutdown
+running = True
+
+def stop_handler(sig, frame):
+    global running
+    print("\n[+] Stopping IDS Monitor...")
+    running = False
+
+signal.signal(signal.SIGINT, stop_handler)
+signal.signal(signal.SIGTERM, stop_handler)
 
 attack_patterns = {
     "SYN_SCAN": r"SYN",
@@ -54,13 +69,33 @@ ip_attack_history = defaultdict(set)
 total_attacks = 0
 
 
+# ---------------------------
+# FIREWALL FUNCTIONS
+# ---------------------------
+
 def block_ip(ip):
-    subprocess.call(["sudo", "iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"])
+    # Prevent duplicate rules
+    check = subprocess.call(
+        ["sudo", "iptables", "-C", "INPUT", "-s", ip, "-j", "DROP"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+    if check != 0:
+        subprocess.call(["sudo", "iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"])
 
 
 def unblock_ip(ip):
-    subprocess.call(["sudo", "iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"])
+    subprocess.call(
+        ["sudo", "iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 
+
+# ---------------------------
+# FILE FUNCTIONS
+# ---------------------------
 
 def ensure_blacklist():
     if not os.path.exists(BLACKLIST_FILE):
@@ -82,8 +117,11 @@ def write_blacklist(ip, attack, count):
         f.write(f"{now} {ip} {attack} {count}\n")
 
 
-def severity_label(score):
+# ---------------------------
+# DISPLAY
+# ---------------------------
 
+def severity_label(score):
     if score >= 9:
         return "CRITICAL"
     elif score >= 7:
@@ -95,7 +133,6 @@ def severity_label(score):
 
 
 def dashboard():
-
     os.system("clear" if os.name == "posix" else "cls")
 
     print("======================================")
@@ -109,7 +146,6 @@ def dashboard():
     sorted_ips = sorted(packet_counter.items(), key=lambda x: x[1], reverse=True)
 
     for ip, count in sorted_ips[:5]:
-
         if ip in permanent_block:
             status = "PERMANENT BLOCK"
         elif ip in blocked_ips:
@@ -122,81 +158,83 @@ def dashboard():
     print("\nRecent Attack Types\n")
 
     for ip, attacks in ip_attack_history.items():
-
         for attack in attacks:
-
             score = severity_score.get(attack, 1)
             label = severity_label(score)
-
             print(f"{ip} → {attack} | score:{score} | {label}")
 
     print("\nMonitoring:", LOG_FILE)
 
 
-print("Starting Snort IDS Monitor...\n")
+# ---------------------------
+# MAIN
+# ---------------------------
 
-with open(LOG_FILE, "r") as logfile:
+print("[+] Starting Snort IDS Monitor...\n")
 
-    logfile.seek(0, 2)
+try:
+    with open(LOG_FILE, "r") as logfile:
 
-    while True:
+        logfile.seek(0, 2)  # move to end
 
-        line = logfile.readline()
+        while running:
 
-        if not line:
-            time.sleep(0.5)
-            continue
+            line = logfile.readline()
 
-        ip_match = re.findall(ip_regex, line)
+            if not line:
+                time.sleep(0.5)
+                continue
 
-        if not ip_match:
-            continue
+            ip_match = re.findall(ip_regex, line)
 
-        attacker_ip = ip_match[0]
+            if not ip_match:
+                continue
 
-        for attack, pattern in attack_patterns.items():
+            attacker_ip = ip_match[0]
 
-            if re.search(pattern, line, re.IGNORECASE):
+            for attack, pattern in attack_patterns.items():
 
-                packet_counter[attacker_ip] += 1
-                total_attacks += 1
+                if re.search(pattern, line, re.IGNORECASE):
 
-                score = severity_score.get(attack, 1)
+                    packet_counter[attacker_ip] += 1
+                    total_attacks += 1
 
-                print(f"[ATTACK] {attack} | {attacker_ip} | score:{score}")
+                    score = severity_score.get(attack, 1)
 
-                if attacker_ip not in blocked_ips and attacker_ip not in permanent_block:
+                    print(f"[ATTACK] {attack} | {attacker_ip} | score:{score}")
 
-                    block_ip(attacker_ip)
-
-                    blocked_ips[attacker_ip] = datetime.now()
-
-                    write_blacklist(
-                        attacker_ip,
-                        attack,
-                        packet_counter[attacker_ip]
-                    )
-
-                elif attacker_ip in blocked_ips:
-
-                    if attack not in ip_attack_history[attacker_ip]:
+                    if attacker_ip not in blocked_ips and attacker_ip not in permanent_block:
 
                         block_ip(attacker_ip)
+                        blocked_ips[attacker_ip] = datetime.now()
 
-                        permanent_block.add(attacker_ip)
+                        write_blacklist(attacker_ip, attack, packet_counter[attacker_ip])
 
-                        write_blacklist(
-                            attacker_ip,
-                            attack,
-                            packet_counter[attacker_ip]
-                        )
+                    elif attacker_ip in blocked_ips:
 
-        dashboard()
+                        if attack not in ip_attack_history[attacker_ip]:
 
-        for ip, block_time in list(blocked_ips.items()):
+                            block_ip(attacker_ip)
+                            permanent_block.add(attacker_ip)
 
-            if datetime.now() - block_time > TEMP_BLOCK_TIME and ip not in permanent_block:
+                            write_blacklist(attacker_ip, attack, packet_counter[attacker_ip])
 
-                unblock_ip(ip)
+            dashboard()
 
-                del blocked_ips[ip]
+            # Handle temporary unblock
+            for ip, block_time in list(blocked_ips.items()):
+
+                if datetime.now() - block_time > TEMP_BLOCK_TIME and ip not in permanent_block:
+
+                    print(f"[+] Unblocking {ip}")
+                    unblock_ip(ip)
+                    del blocked_ips[ip]
+
+except FileNotFoundError:
+    print(f"[ERROR] Log file not found: {LOG_FILE}")
+
+except Exception as e:
+    print(f"[ERROR] {e}")
+
+finally:
+    print("[+] IDS Monitor stopped cleanly.")
