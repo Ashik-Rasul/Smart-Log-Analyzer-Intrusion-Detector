@@ -2,30 +2,30 @@
 
 echo "[+] Starting Monitoring Tools..."
 
-# Run Python programs in background
-python3 brute_force_detection.py &
+# Background processes
+setsid python3 brute_force_detection.py > /dev/null 2>&1 &
 PID1=$!
 
-python3 sn.py &
+setsid bash unusual_login_alert.sh > /dev/null 2>&1 &
 PID2=$!
 
-# Run shell scripts in background
-bash unusual_login_alert.sh &
+setsid bash Mailer_blacklist_fromSnort.sh > /dev/null 2>&1 &
 PID3=$!
 
-bash Mailer_blacklist_fromSnort.sh &
-PID4=$!
-
 echo "-----------------------------------------"
-echo "All monitoring tools started             "
-echo "PIDs                              :      "
-echo "Brute Force Detector              : $PID1"
-echo "Sniffer                           : $PID2"
-echo "unusual_login_alert.sh            : $PID3"
-echo "mailer_blacklist_fromSnort        : $PID4"
+echo "Background tools started"
+echo "Brute Force Detector       : $PID1"
+echo "unusual_login_alert.sh     : $PID2"
+echo "mailer_blacklist_fromSnort : $PID3"
 echo "-----------------------------------------"
 
-# Optional: save PIDs
-echo $PID1 $PID2 $PID3 $PID4 > monitor_pids.txt
+# Save ONLY background PIDs
+echo $PID1 $PID2 $PID3 > monitor_pids.txt
 
-echo "Processes running in background"
+echo "[+] Starting sn.py in this terminal..."
+echo "Press CTRL+C to stop sn.py"
+
+# 👉 FOREGROUND (NO &)
+python3 sn.py
+
+echo "[+] sn.py stopped. Exiting Starter."
