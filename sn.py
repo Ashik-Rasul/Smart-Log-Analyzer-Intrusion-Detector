@@ -7,16 +7,25 @@ import subprocess
 import signal
 import sys
 import select
+import threading
 from datetime import datetime, timedelta
 from collections import defaultdict
 
+# ---------------------------
+# CONFIG
+# ---------------------------
+
 LOG_FILE = "/var/log/snort/snort.alert.fast"
+AUTH_LOG_FILE = "/var/log/auth.log"
 BLACKLIST_FILE = "blacklist.txt"
 
 TEMP_BLOCK_TIME = timedelta(hours=2)
 
-# Control flag
 running = True
+
+# ---------------------------
+# SIGNAL HANDLER
+# ---------------------------
 
 def stop_handler(sig, frame):
     global running
@@ -25,6 +34,10 @@ def stop_handler(sig, frame):
 
 signal.signal(signal.SIGINT, stop_handler)
 signal.signal(signal.SIGTERM, stop_handler)
+
+# ---------------------------
+# ATTACK PATTERNS
+# ---------------------------
 
 attack_patterns = {
     "SYN_SCAN": r"SYN",
@@ -62,13 +75,23 @@ severity_score = {
 
 ip_regex = r'(\d+\.\d+\.\d+\.\d+)'
 
+# SSH patterns
+ssh_success_pattern = r"Accepted .* from (\d+\.\d+\.\d+\.\d+)"
+ssh_fail_pattern = r"Failed .* from (\d+\.\d+\.\d+\.\d+)"
+
+# ---------------------------
+# DATA STORAGE
+# ---------------------------
+
 packet_counter = defaultdict(int)
 blocked_ips = {}
 permanent_block = set()
 ip_attack_history = defaultdict(set)
 
-total_attacks = 0
+ssh_success_count = defaultdict(int)
+ssh_fail_count = defaultdict(int)
 
+total_attacks = 0
 
 # ---------------------------
 # FIREWALL FUNCTIONS
@@ -92,7 +115,6 @@ def unblock_ip(ip):
         stderr=subprocess.DEVNULL
     )
 
-
 # ---------------------------
 # FILE FUNCTIONS
 # ---------------------------
@@ -115,7 +137,6 @@ def write_blacklist(ip, attack, count):
     with open(BLACKLIST_FILE, "a") as f:
         f.write(f"{now} {ip} {attack} {count}\n")
 
-
 # ---------------------------
 # DISPLAY
 # ---------------------------
@@ -135,7 +156,7 @@ def dashboard():
     os.system("clear" if os.name == "posix" else "cls")
 
     print("======================================")
-    print(" SNORT IPS LIVE ATTACK DASHBOARD ")
+    print(" SNORT + SSH IPS LIVE DASHBOARD ")
     print("======================================\n")
 
     print(f"Total Attacks Detected : {total_attacks}\n")
@@ -162,14 +183,73 @@ def dashboard():
             label = severity_label(score)
             print(f"{ip} → {attack} | score:{score} | {label}")
 
-    print("\nMonitoring:", LOG_FILE)
+    # SSH Section
+    print("\n======================================")
+    print(" SSH LOGIN ACTIVITY ")
+    print("======================================\n")
 
+    for ip in set(list(ssh_success_count.keys()) + list(ssh_fail_count.keys())):
+        success = ssh_success_count[ip]
+        fail = ssh_fail_count[ip]
+
+        print(f"{ip} → SUCCESS: {success} | FAILED: {fail}")
+
+    print("\nMonitoring:")
+    print(f"Snort Log : {LOG_FILE}")
+    print(f"Auth Log  : {AUTH_LOG_FILE}")
 
 # ---------------------------
-# MAIN
+# SSH LOG MONITOR
 # ---------------------------
 
-print("[+] Starting Snort IDS Monitor...\n")
+def monitor_auth_log():
+    try:
+        with open(AUTH_LOG_FILE, "r") as authlog:
+            authlog.seek(0, 2)
+
+            while running:
+                ready, _, _ = select.select([authlog], [], [], 0.5)
+
+                if not ready:
+                    continue
+
+                line = authlog.readline()
+                if not line:
+                    continue
+
+                success_match = re.search(ssh_success_pattern, line)
+                fail_match = re.search(ssh_fail_pattern, line)
+
+                if success_match:
+                    ip = success_match.group(1)
+                    ssh_success_count[ip] += 1
+                    print(f"[SSH SUCCESS] {ip}")
+
+                elif fail_match:
+                    ip = fail_match.group(1)
+                    ssh_fail_count[ip] += 1
+                    print(f"[SSH FAILED] {ip}")
+
+                    # Brute force detection
+                    if ssh_fail_count[ip] >= 5:
+                        print(f"[!] SSH BRUTE FORCE DETECTED: {ip}")
+
+                        if ip not in blocked_ips:
+                            block_ip(ip)
+                            blocked_ips[ip] = datetime.now()
+
+    except FileNotFoundError:
+        print(f"[ERROR] Auth log not found: {AUTH_LOG_FILE}")
+
+# ---------------------------
+# MAIN SNORT MONITOR
+# ---------------------------
+
+print("[+] Starting Snort + SSH IDS Monitor...\n")
+
+# Start SSH monitoring thread
+auth_thread = threading.Thread(target=monitor_auth_log, daemon=True)
+auth_thread.start()
 
 try:
     with open(LOG_FILE, "r") as logfile:
@@ -178,7 +258,6 @@ try:
 
         while running:
 
-            # NON-BLOCKING CHECK
             ready, _, _ = select.select([logfile], [], [], 0.5)
 
             if not ready:
