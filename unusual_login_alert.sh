@@ -16,15 +16,20 @@ do
             
             USER=$(echo "$line" | awk '{print $9}')
             IP=$(echo "$line" | awk '{print $11}')
+            LOG_TIME=$(echo "$line" | awk '{print $1, $2, $3}')
 
-            MESSAGE="Unusual SSH login detected!
+            MESSAGE="⚠️ ALERT: Unauthorized SSH Access Detected
+
+Your server was accessed without permission at an unusual time.
 
 User: $USER
 IP Address: $IP
-Time: $(date)
+Time: $LOG_TIME
 
 Log Entry:
-$line"
+$line
+
+Please verify this activity immediately."
 
             echo "$MESSAGE" | mail -s "ALERT: Unusual SSH Login" "$ADMIN_EMAIL"
 
